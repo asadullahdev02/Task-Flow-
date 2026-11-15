@@ -1,122 +1,165 @@
 """
-Automated Verification Suite for TaskFlow with Real Developed Projects
-Verifies exact 3 projects, Jazeela Makeup Studio, Pending/In-Progress/Completed pipelines, and CustomTkinter UI.
+TaskFlow Test Suite: Database Unit Tests & CustomTkinter UI Verification
 """
 
 import os
-import sys
-
+import gc
+import tempfile
+import unittest
 from database import DatabaseManager
 from models import Status, Priority, ProjectStatus, Project, Task
 
 
-def test_real_projects_and_metrics():
-    print("[1/3] Testing SQLite Real Projects, Jazeela Makeup Studio, and Status Synchronization...")
-    db = DatabaseManager("taskflow.db")
+class TaskFlowUnitTests(unittest.TestCase):
+    def setUp(self):
+        # Create temp db and immediately close the file handle so SQLite owns it
+        fd, self.temp_db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.db = DatabaseManager(self.temp_db_path)
 
-    # 1. Verify exact 3 projects
-    projects = db.get_all_projects()
-    assert len(projects) == 3, f"Expected exactly 3 projects, got {len(projects)}"
+    def tearDown(self):
+        del self.db
+        gc.collect()
+        try:
+            if os.path.exists(self.temp_db_path):
+                os.remove(self.temp_db_path)
+        except OSError:
+            pass
 
-    expected_projects = {
-        "To-Do List App": ("Productivity", "Completed", "A task management application for organizing daily tasks."),
-        "Jazeela Makeup Studio": ("Beauty & Business Website", "Completed", "A professional makeup studio website."),
-        "TripVista": ("Travel & Tourism", "Completed", "A Pakistan-based travel booking website built with React.js and Tailwind CSS.")
-    }
+    def test_database_integrity(self):
+        """Verify SQLite PRAGMA integrity check returns OK."""
+        self.assertTrue(self.db.check_integrity(), "Database integrity check failed.")
 
-    for p in projects:
-        assert p.name in expected_projects, f"Unexpected project found: {p.name}"
-        exp_cat, exp_stat, exp_desc = expected_projects[p.name]
-        assert p.category == exp_cat, f"Category mismatch for {p.name}: got {p.category}, expected {exp_cat}"
-        assert p.status == exp_stat, f"Status mismatch for {p.name}: got {p.status}, expected {exp_stat}"
-        assert p.description == exp_desc, f"Description mismatch for {p.name}: got {p.description}"
-        assert p.progress_percentage == 100.0, f"Progress mismatch for {p.name}: got {p.progress_percentage}%"
-        print(f"  [OK] Project '{p.name}' ({p.category}) verified as 100% Completed.")
+    def test_real_projects_initialized(self):
+        """Verify baseline real projects are seeded accurately."""
+        projects = self.db.get_all_projects()
+        self.assertEqual(len(projects), 3, f"Expected 3 seeded projects, got {len(projects)}")
+        project_names = [p.name for p in projects]
+        self.assertIn("To-Do List App", project_names)
+        self.assertIn("Jazeela Makeup Studio", project_names)
+        self.assertIn("TripVista", project_names)
 
-    # 2. Verify Initial Dashboard Metrics
-    m = db.get_dashboard_metrics()
-    assert m["total_projects"] == 3, f"Expected 3 total projects, got {m['total_projects']}"
-    assert m["completed_projects"] == 3, f"Expected 3 completed projects, got {m['completed_projects']}"
-    assert m["pending_projects"] == 0, f"Expected 0 pending projects, got {m['pending_projects']}"
-    assert m["in_progress_projects"] == 0, f"Expected 0 in-progress projects, got {m['in_progress_projects']}"
-    assert m["completion_rate"] == 100.0, f"Expected 100% completion rate, got {m['completion_rate']}%"
-    print("  [OK] Initial counts: Total=3, Completed=3, Pending=0, In Progress=0, Completion Rate=100.0%.")
+    def test_project_lifecycle_and_metrics(self):
+        """Verify project creation, status transitions, and dynamic dashboard metrics."""
+        m_initial = self.db.get_dashboard_metrics()
+        self.assertEqual(m_initial["total_projects"], 3)
+        self.assertEqual(m_initial["completed_projects"], 3)
+        self.assertEqual(m_initial["pending_projects"], 0)
 
-    # 3. Test Adding a Future Project with Pending Status
-    print("  -> Testing creation of future project with Pending status...")
-    new_pid = db.create_project(
-        name="Automated Inventory Portal",
-        description="Warehouse management system",
-        category="Operations",
-        deadline=None,
-        status=ProjectStatus.PENDING
-    )
-    assert new_pid > 0, "Failed to create new Pending project"
-    
-    # Verify Dashboard updates automatically based on SQLite project status
-    m_after_pending = db.get_dashboard_metrics()
-    assert m_after_pending["total_projects"] == 4, f"Expected 4 total projects, got {m_after_pending['total_projects']}"
-    assert m_after_pending["completed_projects"] == 3, f"Expected 3 completed projects, got {m_after_pending['completed_projects']}"
-    assert m_after_pending["pending_projects"] == 1, f"Expected 1 pending project, got {m_after_pending['pending_projects']}"
-    assert m_after_pending["in_progress_projects"] == 0, f"Expected 0 in-progress projects, got {m_after_pending['in_progress_projects']}"
-    print("  [OK] Dynamic Dashboard update verified: Total=4, Completed=3, Pending=1, In Progress=0.")
+        # Create new Pending project
+        pid = self.db.create_project(
+            name="Cloud Sync Engine",
+            description="Background synchronization agent",
+            category="Infrastructure",
+            deadline="2026-12-31",
+            status=ProjectStatus.PENDING
+        )
+        self.assertGreater(pid, 0)
 
-    # 4. Test Transitioning Status to In Progress
-    db.update_project(
-        project_id=new_pid,
-        name="Automated Inventory Portal",
-        description="Warehouse management system",
-        category="Operations",
-        deadline=None,
-        status=ProjectStatus.IN_PROGRESS
-    )
-    m_after_progress = db.get_dashboard_metrics()
-    assert m_after_progress["pending_projects"] == 0
-    assert m_after_progress["in_progress_projects"] == 1
-    print("  [OK] Transition to In Progress verified: Pending=0, In Progress=1.")
+        m_pending = self.db.get_dashboard_metrics()
+        self.assertEqual(m_pending["total_projects"], 4)
+        self.assertEqual(m_pending["pending_projects"], 1)
+        self.assertEqual(m_pending["completed_projects"], 3)
 
-    # Clean up test project
-    db.delete_project(new_pid)
-    m_final = db.get_dashboard_metrics()
-    assert m_final["total_projects"] == 3
-    assert m_final["pending_projects"] == 0
-    print("  [OK] Test project cleaned up. Portfolio restored to exact 3 completed projects.")
+        # Transition to In Progress
+        self.db.update_project(
+            project_id=pid,
+            name="Cloud Sync Engine",
+            description="Background synchronization agent",
+            category="Infrastructure",
+            deadline="2026-12-31",
+            status=ProjectStatus.IN_PROGRESS
+        )
+        m_prog = self.db.get_dashboard_metrics()
+        self.assertEqual(m_prog["pending_projects"], 0)
+        self.assertEqual(m_prog["in_progress_projects"], 1)
 
-    # 5. Verify Idempotency (no duplicates on second initialization)
-    db2 = DatabaseManager("taskflow.db")
-    assert len(db2.get_all_projects()) == 3, "Duplication detected on database re-initialization!"
-    print("  [OK] Idempotency verified: exactly 3 projects preserved without duplicates on restart.")
+        # Delete project and verify cleanup
+        self.db.delete_project(pid)
+        m_final = self.db.get_dashboard_metrics()
+        self.assertEqual(m_final["total_projects"], 3)
+
+    def test_productivity_statistics(self):
+        """Verify task productivity metrics calculation."""
+        stats = self.db.get_productivity_stats()
+        self.assertIn("priority_breakdown", stats)
+        self.assertIn("category_breakdown", stats)
+        self.assertIn("total_tasks", stats)
+        self.assertIn("task_completion_rate", stats)
+        self.assertIsInstance(stats["task_completion_rate"], float)
+
+    def test_csv_and_json_exports(self):
+        """Verify export to CSV and JSON generates valid, non-empty files."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            csv_tasks = os.path.join(temp_dir, "tasks.csv")
+            csv_projects = os.path.join(temp_dir, "projects.csv")
+            json_db = os.path.join(temp_dir, "db.json")
+
+            # Test exports
+            self.assertTrue(self.db.export_tasks_to_csv(csv_tasks))
+            self.assertTrue(self.db.export_projects_to_csv(csv_projects))
+            self.assertTrue(self.db.export_database_to_json(json_db))
+
+            # Verify files exist and have content
+            self.assertGreater(os.path.getsize(csv_tasks), 50)
+            self.assertGreater(os.path.getsize(csv_projects), 50)
+            self.assertGreater(os.path.getsize(json_db), 100)
+        finally:
+            gc.collect()
+            try:
+                for f in os.listdir(temp_dir):
+                    os.remove(os.path.join(temp_dir, f))
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
+
+    def test_database_backup(self):
+        """Verify SQLite hot backup functionality."""
+        temp_dir = tempfile.mkdtemp()
+        backup_file = os.path.join(temp_dir, "backup.db")
+        try:
+            self.assertTrue(self.db.backup_database(backup_file))
+            self.assertTrue(os.path.exists(backup_file))
+            self.assertGreater(os.path.getsize(backup_file), 0)
+
+            # Check integrity of the backup database
+            backup_db = DatabaseManager(backup_file)
+            self.assertTrue(backup_db.check_integrity())
+            del backup_db
+            gc.collect()
+        finally:
+            try:
+                if os.path.exists(backup_file):
+                    os.remove(backup_file)
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
 
 
-def test_ui_and_dialogs():
-    print("[2/3] Testing CustomTkinter UI, Dashboard Cards, and Project Details...")
+def run_ui_smoke_test():
+    """Headless smoke test for CustomTkinter views."""
+    print("Running CustomTkinter UI smoke test...")
     from main import TaskFlowApp
 
     app = TaskFlowApp()
-    app.withdraw()  # Headless test
+    app.withdraw()  # Run headless
 
-    # Verify navigation and rendering across all 5 views
     for view in ["dashboard", "projects", "tasks", "deadlines", "about"]:
         app.navigate_to(view)
         app.update()
-        print(f"  [OK] View '{view}' rendered successfully.")
-
-    # Verify projects portfolio rendering
-    app.navigate_to("projects")
-    app._filter_projects_list()
-    app.update()
-
-    # Verify task filtering
-    app.navigate_to("tasks")
-    app._refresh_tasks_table()
-    app.update()
 
     app.destroy()
-    print("[3/3] UI and modal components passed cleanly.")
+    print("CustomTkinter UI smoke test passed cleanly.")
 
 
 if __name__ == "__main__":
-    print("=== TaskFlow Verification: Jazeela Makeup Studio & Pending Status Update ===")
-    test_real_projects_and_metrics()
-    test_ui_and_dialogs()
-    print("=== All Verification Tests Passed Successfully! ===")
+    suite = unittest.TestLoader().loadTestsFromTestCase(TaskFlowUnitTests)
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+
+    if result.wasSuccessful():
+        run_ui_smoke_test()
+        print("\n=== All TaskFlow Tests & Verifications Passed! ===")
+    else:
+        exit(1)

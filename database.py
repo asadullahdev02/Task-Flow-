@@ -5,6 +5,9 @@ SQLite Database Operations and Persistence Layer
 
 import sqlite3
 import os
+import csv
+import json
+from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import List, Optional, Dict, Any
 from models import Project, Task, Status, Priority, ProjectStatus
@@ -18,11 +21,15 @@ class DatabaseManager:
         self.db_path = db_path
         self._init_db()
 
-    def get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def get_connection(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         """Initialize SQLite database tables, ensure schema migrations, and sync real projects."""
@@ -512,3 +519,133 @@ class DatabaseManager:
                 "active_projects": projects,
                 "urgent_tasks": urgent_tasks
             }
+
+    # ==========================================
+    # DATA EXPORT & PRODUCTIVITY ANALYTICS
+    # ==========================================
+    def export_tasks_to_csv(self, filepath: str) -> bool:
+        """Export all tasks with project names to a formatted CSV file."""
+        tasks = self.get_all_tasks()
+        try:
+            with open(filepath, mode="w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Project", "Title", "Priority", "Status", "Deadline", "Created At", "Description"])
+                for t in tasks:
+                    writer.writerow([t.id, t.project_name, t.title, t.priority, t.status, t.deadline or "N/A", t.created_at, t.description])
+            return True
+        except Exception as e:
+            print(f"Error exporting tasks to CSV: {e}")
+            return False
+
+    def export_projects_to_csv(self, filepath: str) -> bool:
+        """Export all projects and metrics to a CSV file."""
+        projects = self.get_all_projects()
+        try:
+            with open(filepath, mode="w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Name", "Category", "Status", "Deadline", "Task Count", "Completed Tasks", "Progress %", "Description"])
+                for p in projects:
+                    writer.writerow([p.id, p.name, p.category, p.status, p.deadline or "N/A", p.task_count, p.completed_task_count, f"{p.progress_percentage}%", p.description])
+            return True
+        except Exception as e:
+            print(f"Error exporting projects to CSV: {e}")
+            return False
+
+    def export_database_to_json(self, filepath: str) -> bool:
+        """Export entire project and task database to a structured JSON backup."""
+        projects = self.get_all_projects()
+        data = []
+        for p in projects:
+            tasks = self.get_all_tasks(project_id=p.id)
+            data.append({
+                "project": {
+                    "id": p.id,
+                    "name": p.name,
+                    "category": p.category,
+                    "status": p.status,
+                    "deadline": p.deadline,
+                    "description": p.description,
+                    "progress_percentage": p.progress_percentage,
+                },
+                "tasks": [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "priority": t.priority,
+                        "status": t.status,
+                        "deadline": t.deadline,
+                        "description": t.description,
+                        "created_at": t.created_at,
+                    }
+                    for t in tasks
+                ]
+            })
+        try:
+            with open(filepath, mode="w", encoding="utf-8") as f:
+                json.dump({"version": "1.0", "exported_at": date.today().isoformat(), "portfolio": data}, f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Error exporting database to JSON: {e}")
+            return False
+
+    def get_productivity_stats(self) -> Dict[str, Any]:
+        """Aggregate task priority distributions, category statistics, and completion ratios."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Tasks by Priority
+            cursor.execute("""
+                SELECT priority, COUNT(*) as count
+                FROM tasks
+                GROUP BY priority
+            """)
+            priority_counts = {row["priority"]: row["count"] for row in cursor.fetchall()}
+
+            # Tasks by Category (via Projects)
+            cursor.execute("""
+                SELECT p.category, COUNT(t.id) as task_count
+                FROM projects p
+                LEFT JOIN tasks t ON p.id = t.project_id
+                GROUP BY p.category
+            """)
+            category_counts = {row["category"]: row["task_count"] for row in cursor.fetchall()}
+
+            # Total and Completed task count
+            cursor.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) as done FROM tasks")
+            row = cursor.fetchone()
+            total_tasks = row["total"] or 0
+            done_tasks = row["done"] or 0
+            task_completion_rate = round((done_tasks / total_tasks * 100), 1) if total_tasks > 0 else 0.0
+
+            return {
+                "priority_breakdown": priority_counts,
+                "category_breakdown": category_counts,
+                "total_tasks": total_tasks,
+                "completed_tasks": done_tasks,
+                "task_completion_rate": task_completion_rate,
+            }
+
+    def backup_database(self, backup_path: str) -> bool:
+        """Perform a hot SQLite backup using the native SQLite backup API."""
+        try:
+            with self.get_connection() as src_conn:
+                dst_conn = sqlite3.connect(backup_path)
+                try:
+                    src_conn.backup(dst_conn)
+                finally:
+                    dst_conn.close()
+            return True
+        except Exception as e:
+            print(f"Backup failed: {e}")
+            return False
+
+    def check_integrity(self) -> bool:
+        """Execute SQLite PRAGMA integrity_check to verify database health."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA integrity_check;")
+                result = cursor.fetchone()
+                return result[0] == "ok"
+        except Exception:
+            return False
